@@ -10,7 +10,9 @@ embedded-hal = "1.0"
 rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
 rp2040-boot2 = "0.3"
 panic-halt = "0.2"
+critical-section = "1.1"
 fugit = "0.3"
+interrupt = "0.1.4"
 
 [profile.dev]
 codegen-units = 1
