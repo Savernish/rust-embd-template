@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::OutputPin;
+use embedded_hal::{digital::OutputPin, pwm::SetDutyCycle};
 use fugit::ExtU32;
 use panic_halt as _;
 use rp2040_hal::{
@@ -13,11 +13,11 @@ use rp2040_hal::{
     timer::Alarm0,
     timer::Alarm,
     pac::interrupt,
+    pwm::{Slices, Slice, SliceId, FreeRunning},
     Timer,
 };
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
-use cortex_m::asm;
 
 use critical_section::Mutex;
 
@@ -36,6 +36,22 @@ pub enum Led {
     Led1,
     Led2,
     Led3,
+}
+
+pub enum DutyStates {
+    Min,
+    Mid,
+    Max,
+}
+
+impl DutyStates {
+    fn duty(&self) -> u16 {
+        match self {
+            DutyStates::Min => 1953,   // 1 ms — 0°
+            DutyStates::Mid => 2929,   // 1.5 ms — 90°
+            DutyStates::Max => 3906,   // 2 ms — 180°
+        }
+    }
 }
 
 struct LedManager<'a> {
@@ -72,12 +88,35 @@ impl<'a> LedManager<'a> {
     }
 }
 
+fn pwm_handle_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, cycle: u16) { //Handles the PWM duty cycle, 
+                    //which controls where the servo goes
+                    //we will use the existing alarm to update the duty cycle every 500ms
+                    //which will move the servo to a new position.
+    let clamped = cycle.min(39062);
+    pwm.channel_b.set_duty_cycle(clamped).unwrap(); //Set the duty cycle,
+                    //unwrapping to panic if it's out of range
+                    //(which it shouldn't be due to the clamp above
+}
+
+fn pwm_check_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, step: u32) { //Checks if the duty cycle's state
+                    //which is expressed in DutyState enum
+                    //it iterates to the other state in every alarm cycle
+                    //uses match to match duty cycle with states
+    let state = match step % 3 {
+        0 => DutyStates::Min,
+        1 => DutyStates::Mid,
+        _ => DutyStates::Max,
+    };
+
+    pwm_handle_duty_cycle(pwm, state.duty());
+}
+
 #[interrupt]
 fn TIMER_IRQ_0() {
     critical_section::with(|cs| {
         if let Some(alarm) = SHARED_ALARM.borrow(cs).borrow_mut().as_mut() {
             alarm.clear_interrupt();
-            alarm.schedule(500.millis()).unwrap();
+            alarm.schedule(250.millis()).unwrap();
         }
     });
 
@@ -109,9 +148,18 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    let pwm_slices = Slices::new(pac.PWM, &mut pac.RESETS);
+
+    let mut pwm = pwm_slices.pwm7;
+
+    pwm.set_div_int(64);
+    pwm.set_top(39062);
+    pwm.enable();
+    pwm.channel_b.output_to(pins.gpio15); //The PWM pin is connected to the GPIO15, and the 2040 has the slice 7 set to GPIO15.
+
     let mut led1 = pins.gpio6.into_push_pull_output();
     let mut led2 = pins.gpio18.into_push_pull_output();
-    let mut led3 = pins.gpio14.into_push_pull_output();
+    let mut led3 = pins.gpio8.into_push_pull_output();
 
     // Hardware timer. Ticks at 1 MHz, reads in microseconds.
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
@@ -135,8 +183,10 @@ fn main() -> ! {
     let mut state: u32 = 0;
 
     loop {
+        cortex_m::asm::wfi();
         if TICK.load(Ordering::Relaxed) {
             TICK.store(false, Ordering::Relaxed);
+            pwm_check_duty_cycle(&mut pwm, state);
             manager.chase_step(state);
             state = state.wrapping_add(1);
         }   
