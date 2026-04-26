@@ -21,6 +21,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex;
 
+type ButtonPin = rp2040_hal::gpio::Pin<
+    rp2040_hal::gpio::bank0::Gpio10,
+    rp2040_hal::gpio::FunctionSio<rp2040_hal::gpio::SioInput>,
+    rp2040_hal::gpio::PullUp,
+>;
+
+
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
@@ -31,6 +38,11 @@ static TICK: AtomicBool = AtomicBool::new(false);
 
 static SHARED_ALARM: Mutex<RefCell<Option<Alarm0>>> = 
     Mutex::new(RefCell::new(None));
+
+static SHARED_BUTTON: Mutex<RefCell<Option<ButtonPin>>> =
+    Mutex::new(RefCell::new(None));
+
+static BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);    
 
 pub enum Led {
     Led1,
@@ -116,12 +128,25 @@ fn TIMER_IRQ_0() {
     critical_section::with(|cs| {
         if let Some(alarm) = SHARED_ALARM.borrow(cs).borrow_mut().as_mut() {
             alarm.clear_interrupt();
-            alarm.schedule(250.millis()).unwrap();
+            alarm.schedule(400.millis()).unwrap();
         }
     });
 
     TICK.store(true, Ordering::Relaxed);
 }
+
+#[interrupt]
+fn IO_IRQ_BANK0() {
+    critical_section::with(|cs| {
+        if let Some(button) = SHARED_BUTTON.borrow(cs).borrow_mut().as_mut() {
+            // ack the interrupt for this specific pin and edge type
+            button.clear_interrupt(rp2040_hal::gpio::Interrupt::EdgeLow);
+        }
+    });
+
+    BUTTON_PRESSED.store(true, Ordering::Relaxed);
+}
+
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -161,6 +186,9 @@ fn main() -> ! {
     let mut led2 = pins.gpio18.into_push_pull_output();
     let mut led3 = pins.gpio8.into_push_pull_output();
 
+    let button = pins.gpio10.into_pull_up_input();
+    button.set_interrupt_enabled(rp2040_hal::gpio::Interrupt::EdgeLow, true);
+
     // Hardware timer. Ticks at 1 MHz, reads in microseconds.
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
@@ -170,11 +198,21 @@ fn main() -> ! {
     alarm.enable_interrupt();
 
     critical_section::with(|cs| {
-            SHARED_ALARM.borrow(cs).replace(Some(alarm));
+        SHARED_ALARM.borrow(cs).replace(Some(alarm));
     });
+
     unsafe {
         pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
     }
+
+    critical_section::with(|cs| {
+        SHARED_BUTTON.borrow(cs).replace(Some(button));
+    });
+
+    unsafe {
+        pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+    }
+
 
     let mut manager = LedManager {
         pins: [&mut led1, &mut led2, &mut led3],
@@ -189,6 +227,10 @@ fn main() -> ! {
             pwm_check_duty_cycle(&mut pwm, state);
             manager.chase_step(state);
             state = state.wrapping_add(1);
+            if BUTTON_PRESSED.load(Ordering::Relaxed) {
+                BUTTON_PRESSED.store(false, Ordering::Relaxed);
+                manager.set_all_high();   // visual signal: all LEDs flash
+            }
         }   
     }
 }

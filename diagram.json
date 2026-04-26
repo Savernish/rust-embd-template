@@ -10,7 +10,9 @@
     { "type": "wokwi-resistor", "id": "r1", "top": 80, "left": 100, "attrs": { "value": "220" } },
     { "type": "wokwi-resistor", "id": "r2", "top": 50, "left": 180, "attrs": { "value": "220" } },
     { "type": "wokwi-resistor", "id": "r3", "top": 100, "left": 260, "attrs": { "value": "220" } },
-    { "type": "wokwi-servo", "id": "servo1", "top": 120, "left": 250, "attrs": {} }
+    { "type": "wokwi-servo", "id": "servo1", "top": 120, "left": 250, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "button1", "top": 40, "left": -100, "attrs": { }, "rotate": -90  },
+    { "type": "wokwi-mpu6050", "id": "mpu6050", "top": 220, "left": -10, "attrs": {} }
   ],
   "connections": [
     [ "pico:GP6", "r1:1", "green", [ "v0" ] ],
@@ -19,7 +21,7 @@
 
     [ "pico:GP18", "r2:1", "green", [ "v0" ] ],
     [ "r2:2", "led2:A", "green", [ "v0" ] ],
-    [ "led2:C", "pico:GND.2", "black", [ "v0" ] ],
+    [ "led2:C", "pico:GND.7", "black", [ "v0" ] ],
 
     [ "pico:GP8", "r3:1", "green", [ "v0" ] ],
     [ "r3:2", "led3:A", "green", [ "v0" ] ],
@@ -27,7 +29,14 @@
 
     [ "pico:GP15", "servo1:PWM", "orange", [ "v0" ] ],
     [ "pico:VBUS", "servo1:V+", "red", [ "v0" ] ],
-    [ "pico:GND.4", "servo1:GND", "black", [ "v0" ] ]
+    [ "pico:GND.5", "servo1:GND", "black", [ "v0" ] ],
+    [ "button1:1.l", "pico:GP10", "blue", [ "v0" ] ],
+    [ "button1:2.l", "pico:GND.4", "black", [ "v0" ] ],
+
+    [ "mpu6050:VCC", "pico:3V3", "red", [ "v0" ] ],
+    [ "mpu6050:GND", "pico:GND.2", "black", [ "v0" ] ],
+    [ "mpu6050:SCL", "pico:GP5", "blue", [ "v0" ] ],
+    [ "mpu6050:SDA", "pico:GP4", "blue", [ "v0" ] ]
   ],
   "dependencies": {}
 }
