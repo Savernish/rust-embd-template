@@ -1,12 +1,12 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::{digital::OutputPin, pwm::SetDutyCycle};
-use fugit::ExtU32;
+use embedded_hal::{digital::OutputPin, pwm::SetDutyCycle, i2c::I2c};
+use fugit::{ExtU32, MicrosDurationU32, RateExtU32};
 use panic_halt as _;
 use rp2040_hal::{
     clocks::{init_clocks_and_plls, Clock},
-    gpio::Pins,
+    gpio::{Pins, FunctionI2C, Pin, PullUp},
     pac,
     sio::Sio,
     watchdog::Watchdog,
@@ -14,10 +14,12 @@ use rp2040_hal::{
     timer::Alarm,
     pac::interrupt,
     pwm::{Slices, Slice, SliceId, FreeRunning},
+    i2c::I2C,
     Timer,
 };
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
+
 
 use critical_section::Mutex;
 
@@ -25,6 +27,14 @@ type ButtonPin = rp2040_hal::gpio::Pin<
     rp2040_hal::gpio::bank0::Gpio10,
     rp2040_hal::gpio::FunctionSio<rp2040_hal::gpio::SioInput>,
     rp2040_hal::gpio::PullUp,
+>;
+
+type I2cBus = I2C<
+    pac::I2C0,
+    (
+        Pin<rp2040_hal::gpio::bank0::Gpio4, FunctionI2C, PullUp>,
+        Pin<rp2040_hal::gpio::bank0::Gpio5, FunctionI2C, PullUp>,
+    ),
 >;
 
 
@@ -40,6 +50,9 @@ static SHARED_ALARM: Mutex<RefCell<Option<Alarm0>>> =
     Mutex::new(RefCell::new(None));
 
 static SHARED_BUTTON: Mutex<RefCell<Option<ButtonPin>>> =
+    Mutex::new(RefCell::new(None));
+
+static SHARED_I2C: Mutex<RefCell<Option<I2cBus>>> =
     Mutex::new(RefCell::new(None));
 
 static BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);    
@@ -188,6 +201,19 @@ fn main() -> ! {
 
     let button = pins.gpio10.into_pull_up_input();
     button.set_interrupt_enabled(rp2040_hal::gpio::Interrupt::EdgeLow, true);
+     
+    //I2C Button configrution
+    let scl_pin: Pin<_, FunctionI2C, PullUp> = pins.gpio5.reconfigure();  
+    let sda_pin: Pin<_, FunctionI2C, PullUp> = pins.gpio4.reconfigure();
+
+    let mut i2c = I2C::i2c0(
+        pac.I2C0,
+        sda_pin, // sda
+        scl_pin, // scl
+        400.kHz(),  
+        &mut pac.RESETS,
+        &clocks.system_clock,
+    );
 
     // Hardware timer. Ticks at 1 MHz, reads in microseconds.
     let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
@@ -209,6 +235,10 @@ fn main() -> ! {
         SHARED_BUTTON.borrow(cs).replace(Some(button));
     });
 
+    critical_section::with(|cs| {
+        SHARED_I2C.borrow(cs).replace(Some(i2c));
+    });
+
     unsafe {
         pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
     }
@@ -220,16 +250,52 @@ fn main() -> ! {
 
     let mut state: u32 = 0;
 
+    critical_section::with(|cs| {
+        if let Some(i2c) = SHARED_I2C.borrow(cs).borrow_mut().as_mut() {
+            // Wake the chip: write 0x00 to PWR_MGMT_1 (register 0x6B).
+            i2c.write(0x68u8, &[0x6B, 0x00]).unwrap();
+
+            // Read WHO_AM_I (register 0x75) — must be 0x68.
+            let mut buf = [0u8; 1];
+            i2c.write_read(0x68u8, &[0x75], &mut buf).unwrap();
+
+            if buf[0] != 0x68 {
+                // chip not responding correctly; halt
+                loop {}
+            }
+        }
+    });
+
     loop {
         cortex_m::asm::wfi();
         if TICK.load(Ordering::Relaxed) {
             TICK.store(false, Ordering::Relaxed);
             pwm_check_duty_cycle(&mut pwm, state);
-            manager.chase_step(state);
             state = state.wrapping_add(1);
             if BUTTON_PRESSED.load(Ordering::Relaxed) {
                 BUTTON_PRESSED.store(false, Ordering::Relaxed);
                 manager.set_all_high();   // visual signal: all LEDs flash
+            }
+
+            let mut buf = [0u8; 14];
+            critical_section::with(|cs| {
+                if let Some(i2c) = SHARED_I2C.borrow(cs).borrow_mut().as_mut() {
+                    // Read 14 bytes starting at ACCEL_XOUT_H (0x3B):
+                    // accel X/Y/Z (6), temp (2), gyro X/Y/Z (6).
+                    i2c.write_read(0x68u8, &[0x3B], &mut buf).unwrap();
+                }
+            });
+            let accel_x = i16::from_be_bytes([buf[0], buf[1]]);
+            let accel_y = i16::from_be_bytes([buf[2], buf[3]]);
+            let accel_z = i16::from_be_bytes([buf[4], buf[5]]);
+
+            manager.set_all_low();
+            if accel_x > 4000 {
+                manager.on(Led::Led1);
+            } else if accel_x < -4000 {
+                manager.on(Led::Led3);
+            } else {
+                manager.on(Led::Led2);
             }
         }   
     }
