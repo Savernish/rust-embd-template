@@ -1,25 +1,24 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::{digital::OutputPin, pwm::SetDutyCycle, i2c::I2c};
-use fugit::{ExtU32, MicrosDurationU32, RateExtU32};
-use panic_halt as _;
-use rp2040_hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    gpio::{Pins, FunctionI2C, Pin, PullUp},
-    pac,
-    sio::Sio,
-    watchdog::Watchdog,
-    timer::Alarm0,
-    timer::Alarm,
-    pac::interrupt,
-    pwm::{Slices, Slice, SliceId, FreeRunning},
-    i2c::I2C,
-    Timer,
-};
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
-
+use embedded_hal::{digital::OutputPin, i2c::I2c, pwm::SetDutyCycle};
+use fugit::{ExtU32, /*MicrosDurationU32,*/ RateExtU32};
+use panic_halt as _;
+use rp2040_hal::{
+    clocks::{init_clocks_and_plls /*Clock*/},
+    gpio::{FunctionI2C, Pin, Pins, PullUp},
+    i2c::I2C,
+    pac,
+    pac::interrupt,
+    pwm::{FreeRunning, Slice, SliceId, Slices},
+    sio::Sio,
+    timer::Alarm,
+    timer::Alarm0,
+    watchdog::Watchdog,
+    Timer,
+};
 
 use critical_section::Mutex;
 
@@ -37,7 +36,6 @@ type I2cBus = I2C<
     ),
 >;
 
-
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
@@ -46,16 +44,13 @@ const XTAL_FREQ_HZ: u32 = 12_000_000;
 
 static TICK: AtomicBool = AtomicBool::new(false);
 
-static SHARED_ALARM: Mutex<RefCell<Option<Alarm0>>> = 
-    Mutex::new(RefCell::new(None));
+static SHARED_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
 
-static SHARED_BUTTON: Mutex<RefCell<Option<ButtonPin>>> =
-    Mutex::new(RefCell::new(None));
+static SHARED_BUTTON: Mutex<RefCell<Option<ButtonPin>>> = Mutex::new(RefCell::new(None));
 
-static SHARED_I2C: Mutex<RefCell<Option<I2cBus>>> =
-    Mutex::new(RefCell::new(None));
+static SHARED_I2C: Mutex<RefCell<Option<I2cBus>>> = Mutex::new(RefCell::new(None));
 
-static BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);    
+static BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
 
 pub enum Led {
     Led1,
@@ -72,9 +67,9 @@ pub enum DutyStates {
 impl DutyStates {
     fn duty(&self) -> u16 {
         match self {
-            DutyStates::Min => 1953,   // 1 ms — 0°
-            DutyStates::Mid => 2929,   // 1.5 ms — 90°
-            DutyStates::Max => 3906,   // 2 ms — 180°
+            DutyStates::Min => 1953, // 1 ms — 0°
+            DutyStates::Mid => 2929, // 1.5 ms — 90°
+            DutyStates::Max => 3906, // 2 ms — 180°
         }
     }
 }
@@ -84,11 +79,11 @@ struct LedManager<'a> {
 }
 
 impl<'a> LedManager<'a> {
-    fn on(&mut self, led:Led) {
+    fn on(&mut self, led: Led) {
         let pin = &mut self.pins[led as usize];
         let _ = pin.set_high();
     }
-    fn off(&mut self, led:Led) {
+    fn off(&mut self, led: Led) {
         let pin = &mut self.pins[led as usize];
         let _ = pin.set_low();
     }
@@ -113,20 +108,22 @@ impl<'a> LedManager<'a> {
     }
 }
 
-fn pwm_handle_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, cycle: u16) { //Handles the PWM duty cycle, 
-                    //which controls where the servo goes
-                    //we will use the existing alarm to update the duty cycle every 500ms
-                    //which will move the servo to a new position.
+fn pwm_handle_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, cycle: u16) {
+    //Handles the PWM duty cycle,
+    //which controls where the servo goes
+    //we will use the existing alarm to update the duty cycle every 500ms
+    //which will move the servo to a new position.
     let clamped = cycle.min(39062);
     pwm.channel_b.set_duty_cycle(clamped).unwrap(); //Set the duty cycle,
-                    //unwrapping to panic if it's out of range
-                    //(which it shouldn't be due to the clamp above
+                                                    //unwrapping to panic if it's out of range
+                                                    //(which it shouldn't be due to the clamp above
 }
 
-fn pwm_check_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, step: u32) { //Checks if the duty cycle's state
-                    //which is expressed in DutyState enum
-                    //it iterates to the other state in every alarm cycle
-                    //uses match to match duty cycle with states
+fn pwm_check_duty_cycle<S: SliceId>(pwm: &mut Slice<S, FreeRunning>, step: u32) {
+    //Checks if the duty cycle's state
+    //which is expressed in DutyState enum
+    //it iterates to the other state in every alarm cycle
+    //uses match to match duty cycle with states
     let state = match step % 3 {
         0 => DutyStates::Min,
         1 => DutyStates::Mid,
@@ -159,7 +156,6 @@ fn IO_IRQ_BANK0() {
 
     BUTTON_PRESSED.store(true, Ordering::Relaxed);
 }
-
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -201,16 +197,16 @@ fn main() -> ! {
 
     let button = pins.gpio10.into_pull_up_input();
     button.set_interrupt_enabled(rp2040_hal::gpio::Interrupt::EdgeLow, true);
-     
+
     //I2C Button configrution
-    let scl_pin: Pin<_, FunctionI2C, PullUp> = pins.gpio5.reconfigure();  
+    let scl_pin: Pin<_, FunctionI2C, PullUp> = pins.gpio5.reconfigure();
     let sda_pin: Pin<_, FunctionI2C, PullUp> = pins.gpio4.reconfigure();
 
     let mut i2c = I2C::i2c0(
         pac.I2C0,
         sda_pin, // sda
         scl_pin, // scl
-        400.kHz(),  
+        400.kHz(),
         &mut pac.RESETS,
         &clocks.system_clock,
     );
@@ -243,7 +239,6 @@ fn main() -> ! {
         pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
     }
 
-
     let mut manager = LedManager {
         pins: [&mut led1, &mut led2, &mut led3],
     };
@@ -274,29 +269,29 @@ fn main() -> ! {
             state = state.wrapping_add(1);
             if BUTTON_PRESSED.load(Ordering::Relaxed) {
                 BUTTON_PRESSED.store(false, Ordering::Relaxed);
-                manager.set_all_high();   // visual signal: all LEDs flash
-            }
-
-            let mut buf = [0u8; 14];
-            critical_section::with(|cs| {
-                if let Some(i2c) = SHARED_I2C.borrow(cs).borrow_mut().as_mut() {
-                    // Read 14 bytes starting at ACCEL_XOUT_H (0x3B):
-                    // accel X/Y/Z (6), temp (2), gyro X/Y/Z (6).
-                    i2c.write_read(0x68u8, &[0x3B], &mut buf).unwrap();
-                }
-            });
-            let accel_x = i16::from_be_bytes([buf[0], buf[1]]);
-            let accel_y = i16::from_be_bytes([buf[2], buf[3]]);
-            let accel_z = i16::from_be_bytes([buf[4], buf[5]]);
-
-            manager.set_all_low();
-            if accel_x > 4000 {
-                manager.on(Led::Led1);
-            } else if accel_x < -4000 {
-                manager.on(Led::Led3);
+                manager.set_all_high(); // visual signal: all LEDs flash
             } else {
-                manager.on(Led::Led2);
+                let mut buf = [0u8; 14];
+                critical_section::with(|cs| {
+                    if let Some(i2c) = SHARED_I2C.borrow(cs).borrow_mut().as_mut() {
+                        // Read 14 bytes starting at ACCEL_XOUT_H (0x3B):
+                        // accel X/Y/Z (6), temp (2), gyro X/Y/Z (6).
+                        i2c.write_read(0x68u8, &[0x3B], &mut buf).unwrap();
+                    }
+                });
+                let accel_x = i16::from_be_bytes([buf[0], buf[1]]);
+                //let accel_y = i16::from_be_bytes([buf[2], buf[3]]);
+                //let accel_z = i16::from_be_bytes([buf[4], buf[5]]);
+
+                manager.set_all_low();
+                if accel_x > 4000 {
+                    manager.on(Led::Led1);
+                } else if accel_x < -4000 {
+                    manager.on(Led::Led3);
+                } else {
+                    manager.on(Led::Led2);
+                }
             }
-        }   
+        }
     }
 }
